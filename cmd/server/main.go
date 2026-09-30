@@ -83,7 +83,7 @@ func main() {
 		c.JSON(http.StatusOK, summary)
 	})
 
-	// 4. Trigger concurrent check on all registered monitors
+	// 4. Manual scan trigger
 	router.POST("/monitors/scan", func(c *gin.Context) {
 		monitors, err := store.GetAllMonitors()
 		if err != nil {
@@ -98,7 +98,6 @@ func main() {
 
 		results := scanner.ScanAllConcurrent(urls)
 
-		// Record results back to postgres
 		for _, res := range results {
 			for _, m := range monitors {
 				if m.URL == res.URL {
@@ -112,6 +111,34 @@ func main() {
 			"results":       results,
 		})
 	})
+
+	// Background worker: automatically runs every 60 seconds
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			monitors, err := store.GetAllMonitors()
+			if err != nil || len(monitors) == 0 {
+				continue
+			}
+
+			urls := make([]string, len(monitors))
+			for i, m := range monitors {
+				urls[i] = m.URL
+			}
+
+			results := scanner.ScanAllConcurrent(urls)
+			for _, res := range results {
+				for _, m := range monitors {
+					if m.URL == res.URL {
+						_ = store.SaveCheckResult(m.ID, res)
+					}
+				}
+			}
+			log.Printf("[Worker] Completed background health check for %d targets", len(results))
+		}
+	}()
 
 	log.Println("Uptime Pulse running on :8081")
 	if err := router.Run(":8081"); err != nil {
